@@ -1,0 +1,123 @@
+import streamlit as st
+import pandas as pd
+from groq import Groq
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+# Set Groq API key
+client = Groq(
+    api_key=os.getenv("api_key"),
+)
+
+# Function to get field suggestions from LLM
+def get_field_suggestions(user_input):
+    chat_completion = client.chat.completions.create(
+        messages=[{"role": "user", "content": f"Extract dataset fields and their types (text, numeric, binary) from: {user_input}. Suggest more than 4 fields and make the fields realistic"}],
+        model="llama-3.3-70b-versatile",
+        stream=False,
+    )
+    # Clean the response to remove any unwanted content like introduction
+    response = chat_completion.choices[0].message.content
+    cleaned_response = response.split("\n")
+    
+    # Filter out any introductory content or non-field information
+    cleaned_response = [
+        line for line in cleaned_response
+        if line and ("Name" in line or "Age" in line or "Department" in line or "Salary" in line or "Full-time" in line)  # Add conditions for valid field types
+    ]
+    
+    # Convert cleaned response to a list of dictionaries
+    fields = []
+    for field in cleaned_response:
+        parts = field.split(":")
+        if len(parts) == 2:
+            fields.append({"name": parts[0].strip(), "type": parts[1].strip()})
+    
+    return fields
+
+# Function to generate synthetic data using LLM
+def generate_data_with_llm(user_input, fields, rows=50):
+    field_str = ", ".join([f"{field['name']} ({field['type']})" for field in fields])
+    prompt = f"Generate a dataset with {rows} rows using the following fields: {field_str} to the {user_input} task. Return data in CSV format.dont give any note only give dataset.strictly no duplication in the dataset"
+    chat_completion = client.chat.completions.create(
+        messages=[{"role": "user", "content": prompt}],
+        model="llama-3.3-70b-versatile",
+        stream=False,
+    )
+    return chat_completion.choices[0].message.content
+
+# Streamlit UI
+st.title("Synthetic Dataset Generator")
+
+# Initialize session state for dynamic field addition
+if "fields" not in st.session_state:
+    st.session_state.fields = []
+
+# User input for dataset description
+user_input = st.text_area("Describe your dataset requirements:")
+
+if st.button("Generate Fields using LLM"):
+    if user_input:
+        suggested_fields = get_field_suggestions(user_input)
+        st.session_state.fields = suggested_fields
+    else:
+        st.warning("Please enter dataset requirements before generating fields.")
+
+# Function to add a new field input with field name and datatype selection
+if st.button("Add Field"):
+    st.session_state.fields.append({"name": "", "type": ""})
+
+# Display dynamic field inputs (Field name and datatype dropdown in same row)
+valid_field_types = ["Text", "Numeric", "Binary"]
+
+for i, field in enumerate(st.session_state.fields):
+    col1, col2 = st.columns([3, 2])  # Define two columns, first larger for name, second for data type
+    with col1:
+        field_name = st.text_input(f"Field {i+1} Name:", field["name"])
+    with col2:
+        # Clean the field type to match valid options
+        cleaned_type = field["type"]
+        if "Text" in cleaned_type:
+            field_type = "Text"
+        elif "Numeric" in cleaned_type:
+            field_type = "Numeric"
+        elif "Binary" in cleaned_type:
+            # Check if the binary type is Yes/No or True/False
+            if "Yes/No" in cleaned_type:
+                field_type = "Binary (Yes/No)"
+            elif "True/False" in cleaned_type:
+                field_type = "Binary (True/False)"
+            else:
+                field_type = "Binary"  # Default binary type if neither specific binary found
+
+        else:
+            field_type = "Text"  # Default to Text if no match
+        
+        field_type = st.selectbox(
+            f"Field {i+1} Data Type:", 
+            options=valid_field_types,
+            index=valid_field_types.index(field_type)
+        )
+    
+    st.session_state.fields[i] = {"name": field_name, "type": field_type}
+
+# Input for number of rows to generate
+num_rows = st.number_input("Enter the number of rows to generate:", min_value=1, max_value=1000, value=50)
+
+# Generate dataset button
+if st.button("Generate Dataset"):
+    if user_input and st.session_state.fields:
+        dataset_csv = generate_data_with_llm(user_input, st.session_state.fields, rows=num_rows)
+        
+        # Convert CSV string to DataFrame
+        from io import StringIO
+        dataset = pd.read_csv(StringIO(dataset_csv))
+        
+        st.dataframe(dataset)
+        
+        # CSV download
+        csv = dataset_csv.encode('utf-8')
+        st.download_button("Download CSV", csv, "synthetic_dataset.csv", "text/csv")
+    else:
+        st.warning("Please enter dataset requirements and at least one field!")
